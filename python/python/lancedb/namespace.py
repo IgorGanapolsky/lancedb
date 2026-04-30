@@ -624,6 +624,8 @@ class LanceNamespaceDBConnection(DBConnection):
         namespace_path : Optional[List[str]]
             The parent namespace path to list children from.
             If None, lists root-level namespaces.
+
+            *Changed in version 0.31.0: renamed from* ``namespace``.
         page_token : Optional[str]
             Token for pagination. Use the token from a previous response
             to get the next page of results.
@@ -1043,6 +1045,8 @@ class AsyncLanceNamespaceDBConnection:
         namespace_path : Optional[List[str]]
             The parent namespace path to list children from.
             If None, lists root-level namespaces.
+
+            *Changed in version 0.31.0: renamed from* ``namespace``.
         page_token : Optional[str]
             Token for pagination. Use the token from a previous response
             to get the next page of results.
