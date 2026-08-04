@@ -3,12 +3,14 @@
 
 use std::sync::Arc;
 
+use arrow_schema::Schema as ArrowSchema;
 use lance::dataset::UpdateBuilder as LanceUpdateBuilder;
 use serde::{Deserialize, Serialize};
 
 use super::{BaseTable, NativeTable};
 use crate::Error;
 use crate::Result;
+use crate::blob::{blob_column_names, has_blob_columns};
 
 /// The result of an update operation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -82,6 +84,25 @@ pub(crate) async fn execute_update(
 
     // 1. Snapshot the current dataset
     let dataset = table.dataset.get().await?;
+
+    // Lance's update path does not coerce blob v2 columns (stored as a
+    // `Struct<data, uri>` descriptor) the way `add()` does via
+    // `cast_to_table_schema`/`coerce_blob_expr`. Any update on a table with a
+    // blob v2 column — regardless of which column is being set — trips an
+    // internal lance-core schema-mismatch error asking for a bug report
+    // instead of a usable one. Fail clearly here until lance-core's update
+    // path handles blob v2 columns. See
+    // https://github.com/lancedb/lancedb/issues/3760
+    let arrow_schema = ArrowSchema::from(dataset.schema());
+    if has_blob_columns(&arrow_schema) {
+        return Err(Error::NotSupported {
+            message: format!(
+                "update() is not currently supported on tables containing blob v2 \
+                 column(s) ({}); delete() the affected rows and add() them again instead",
+                blob_column_names(&arrow_schema).join(", ")
+            ),
+        });
+    }
 
     // 2. Initialize the Lance Core builder
     let mut builder = LanceUpdateBuilder::new(dataset);
@@ -424,5 +445,70 @@ mod tests {
         assert_eq!(1, tbl.count_rows(Some("i == 0".to_string())).await.unwrap());
         tbl.update().column("i", "i+1").execute().await.unwrap();
         assert_eq!(0, tbl.count_rows(Some("i == 0".to_string())).await.unwrap());
+    }
+
+    // https://github.com/lancedb/lancedb/issues/3760
+    //
+    // Before this fix, calling `update()` on a table with a blob v2 column
+    // hit an internal lance-core schema-mismatch error ("Encountered internal
+    // error. Please file a bug report...") regardless of which column was
+    // being set, because lance's update path (unlike `add()`) never coerces
+    // the blob's storage representation back to its declared struct layout.
+    #[tokio::test]
+    async fn update_on_blob_v2_table_returns_a_clear_error_instead_of_internal_panic() {
+        use crate::Error;
+        use crate::blob::blob;
+        use arrow_array::{ArrayRef, LargeBinaryArray, StructArray};
+
+        let conn = connect("memory://")
+            .read_consistency_interval(Duration::from_secs(0))
+            .execute()
+            .await
+            .unwrap();
+
+        let image_field = blob("image", true);
+        let DataType::Struct(child_fields) = image_field.data_type().clone() else {
+            panic!("blob() did not produce a struct-typed field");
+        };
+
+        // Build a batch already in the blob's physical `Struct<data, uri>`
+        // layout, matching what lance itself would write.
+        let data: ArrayRef = Arc::new(LargeBinaryArray::from_iter_values([b"DATA".as_slice()]));
+        let uri: ArrayRef = Arc::new(StringArray::from(vec![None::<&str>]));
+        let image = StructArray::new(child_fields, vec![data, uri], None);
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            image_field,
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from_iter_values([0])), Arc::new(image)],
+        )
+        .unwrap();
+
+        let table = conn
+            .create_table("blob_table", batch)
+            .execute()
+            .await
+            .unwrap();
+
+        // Updating a column that has nothing to do with the blob column
+        // still hit the internal error before this fix.
+        let err = table
+            .update()
+            .column("id", "1")
+            .execute()
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, Error::NotSupported { .. }),
+            "expected Error::NotSupported, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("blob v2"),
+            "error message should mention blob v2 columns, got: {err}"
+        );
     }
 }
