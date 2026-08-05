@@ -36,7 +36,12 @@ pub(super) fn coerce_blob_expr(
     };
 
     let input_struct_children = match input_field.data_type() {
-        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => None,
+        // `Null` is what Arrow/PyArrow infers for a batch whose column is
+        // all-None (e.g. `table.add([{"id": "a", "val": None}])`). Treat it
+        // like the raw-binary case: `CastExpr` from `Null` to any nullable
+        // target type produces an all-null array, so every declared child
+        // (including `data`) comes out null, matching the "no value" intent.
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView | DataType::Null => None,
         DataType::Struct(children) => {
             if !children
                 .iter()
@@ -406,6 +411,28 @@ mod tests {
             .unwrap();
         assert_eq!(size.value(0), 6);
         assert!(image.column_by_name("data").unwrap().is_null(0));
+    }
+
+    #[tokio::test]
+    async fn all_null_batch_coerces_to_declared_blob_struct() {
+        // Arrow/PyArrow infers `DataType::Null` for a batch whose column is
+        // entirely `None`, e.g. `table.add([{"id": "a", "val": None}])`.
+        // Regression test for the coercion rejecting that with:
+        // "cannot coerce column 'image' with type Null into a blob v2
+        // struct. expected Binary, LargeBinary, BinaryView, or a Struct
+        // with a 'data' or 'uri' child".
+        use arrow_array::NullArray;
+
+        let batch = batch_with_image(
+            Field::new("image", DataType::Null, true),
+            Arc::new(NullArray::new(1)),
+        );
+        let coerced = coerce(batch, &blob_table_schema()).await;
+        let image_field = coerced.schema().field_with_name("image").unwrap().clone();
+        assert!(image_field.is_blob_v2());
+        let image = image_struct(&coerced);
+        assert!(image.column_by_name("data").unwrap().is_null(0));
+        assert!(image.column_by_name("uri").unwrap().is_null(0));
     }
 
     #[tokio::test]
