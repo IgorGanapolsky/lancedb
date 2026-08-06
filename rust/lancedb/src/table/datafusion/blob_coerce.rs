@@ -36,7 +36,7 @@ pub(super) fn coerce_blob_expr(
     };
 
     let input_struct_children = match input_field.data_type() {
-        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => None,
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView | DataType::Null => None,
         DataType::Struct(children) => {
             if !children
                 .iter()
@@ -134,7 +134,7 @@ mod tests {
     use crate::blob::blob;
     use arrow_array::{
         Array, ArrayRef, BinaryArray, BinaryViewArray, Int32Array, Int64Array, LargeBinaryArray,
-        RecordBatch, StringArray, StructArray, UInt8Array, UInt64Array,
+        NullArray, RecordBatch, StringArray, StructArray, UInt8Array, UInt64Array,
     };
     use arrow_schema::Schema;
     use datafusion::prelude::SessionContext;
@@ -272,6 +272,22 @@ mod tests {
         let data = image.column_by_name("data").unwrap();
         assert!(!data.is_null(0));
         assert!(data.is_null(1));
+    }
+
+    #[tokio::test]
+    async fn all_null_column_coerces_to_declared_blob_struct() {
+        // PyArrow infers an all-null input column (e.g. `[{"id": "a", "val": None}]`)
+        // as DataType::Null. Regression test for
+        // https://github.com/lancedb/lancedb/issues/3759
+        let batch = batch_with_image(
+            Field::new("image", DataType::Null, true),
+            Arc::new(NullArray::new(1)),
+        );
+        let coerced = coerce(batch, &blob_table_schema()).await;
+        let image_field = coerced.schema().field_with_name("image").unwrap().clone();
+        assert!(image_field.is_blob_v2());
+        let data = image_struct(&coerced).column_by_name("data").unwrap();
+        assert!(data.is_null(0));
     }
 
     #[tokio::test]
