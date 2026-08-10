@@ -1018,11 +1018,17 @@ impl Database for ListingDatabase {
             f.drain(0..index);
         }
 
-        // Determine if there's a next page
+        // Determine if there's a next page. The token must be the last name
+        // *included* in this page (not the first name of the next page): the
+        // page_token filter above is an exclusive "greater than" comparison,
+        // so handing back the next page's first name would cause that name
+        // to be skipped entirely once it becomes the `page_token` for the
+        // following call.
         let next_page_token = if let Some(limit) = request.limit {
-            if f.len() > limit as usize {
-                let token = f[limit as usize].clone();
-                f.truncate(limit as usize);
+            let limit = limit as usize;
+            if limit > 0 && f.len() > limit {
+                let token = f[limit - 1].clone();
+                f.truncate(limit);
                 Some(token)
             } else {
                 None
@@ -2863,5 +2869,56 @@ mod tests {
             .await
             .unwrap();
         assert!(post_drop.tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_listing_database_list_tables_pagination_no_gaps() {
+        // Regression test for a bug where list_tables() lost exactly one
+        // table at every page boundary: the returned page_token was the
+        // first name of the *next* page, but the page_token filter is an
+        // exclusive "greater than" comparison, so that name was skipped
+        // once it was fed back in as the next call's page_token.
+        let (_tempdir, db) = setup_database().await;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+
+        let expected: Vec<String> = (0..15).map(|i| format!("t{:02}", i)).collect();
+        for name in &expected {
+            db.create_table(CreateTableRequest {
+                name: name.clone(),
+                namespace_path: vec![],
+                data: Box::new(RecordBatch::new_empty(schema.clone())) as Box<dyn Scannable>,
+                mode: CreateTableMode::Create,
+                write_options: Default::default(),
+                location: None,
+                namespace_client: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let mut collected = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let response = db
+                .list_tables(ListTablesRequest {
+                    id: None,
+                    page_token: page_token.clone(),
+                    limit: Some(5),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(
+                response.tables.len() <= 5,
+                "page should never exceed the requested limit"
+            );
+            collected.extend(response.tables);
+            page_token = response.page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(collected, expected);
     }
 }
