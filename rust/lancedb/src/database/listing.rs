@@ -985,11 +985,17 @@ impl Database for ListingDatabase {
             .collect::<Vec<String>>();
         f.sort();
 
-        // Handle pagination with page_token
+        // Handle pagination with page_token.
+        //
+        // `next_page_token` below is set to the name of the first table *excluded* from
+        // the current page (i.e. the first table the next page should include), so this
+        // comparison must be inclusive (`>=`). Using a strict `>` here previously excluded
+        // that boundary table from every subsequent page, silently dropping exactly one
+        // table per page boundary.
         if let Some(ref page_token) = request.page_token {
             let index = f
                 .iter()
-                .position(|name| name.as_str() > page_token.as_str())
+                .position(|name| name.as_str() >= page_token.as_str())
                 .unwrap_or(f.len());
             f.drain(0..index);
         }
@@ -1296,6 +1302,57 @@ mod tests {
             .unwrap();
 
         (tempdir, db)
+    }
+
+    #[tokio::test]
+    async fn test_list_tables_pagination_no_boundary_loss() {
+        // Regression test for https://github.com/lancedb/lancedb/issues/3915:
+        // paginating list_tables() with a page_token used to silently drop the table
+        // sitting exactly on each page boundary.
+        let (_tempdir, db) = setup_database().await;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let mut expected_names: Vec<String> = Vec::new();
+        for i in 0..15 {
+            let name = format!("t{i:02}");
+            db.create_table(CreateTableRequest {
+                name: name.clone(),
+                namespace_path: vec![],
+                data: Box::new(RecordBatch::new_empty(schema.clone())) as Box<dyn Scannable>,
+                mode: CreateTableMode::Create,
+                write_options: Default::default(),
+                location: None,
+                namespace_client: None,
+            })
+            .await
+            .unwrap();
+            expected_names.push(name);
+        }
+        expected_names.sort();
+
+        let mut collected: Vec<String> = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let response = db
+                .list_tables(ListTablesRequest {
+                    limit: Some(5),
+                    page_token: page_token.clone(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            collected.extend(response.tables);
+            page_token = response.page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+
+        collected.sort();
+        assert_eq!(
+            collected, expected_names,
+            "paginated walk must return every table exactly once, with none skipped at page boundaries"
+        );
     }
 
     #[tokio::test]
