@@ -9,6 +9,8 @@ import pyarrow as pa
 _BLOB_EXTENSION_NAME = "lance.blob.v2"
 _BLOB_V1_KEY = "lance-encoding:blob"
 _ARROW_EXT_NAME_KEY = "ARROW:extension:name"
+_ARROW_JSON_EXTENSION_NAME = "arrow.json"
+_LANCE_JSON_EXTENSION_NAME = "lance.json"
 
 
 class BlobType(pa.ExtensionType):
@@ -90,6 +92,58 @@ def is_blob_like_field(field: pa.Field) -> bool:
     the same metadata). Not used for fetch or auto ``_rowid``.
     """
     return is_blob_v2_field(field) or _metadata_marks_legacy_blob(field.metadata or {})
+
+
+def _metadata_marks_arrow_json(metadata: dict) -> bool:
+    if not metadata:
+        return False
+
+    extension_name = _metadata_value(metadata, _ARROW_EXT_NAME_KEY)
+    return extension_name in (
+        _ARROW_JSON_EXTENSION_NAME,
+        _ARROW_JSON_EXTENSION_NAME.encode(),
+    )
+
+
+def _metadata_marks_lance_json(metadata: dict) -> bool:
+    if not metadata:
+        return False
+
+    extension_name = _metadata_value(metadata, _ARROW_EXT_NAME_KEY)
+    return extension_name in (
+        _LANCE_JSON_EXTENSION_NAME,
+        _LANCE_JSON_EXTENSION_NAME.encode(),
+    )
+
+
+def is_arrow_json_field(field: pa.Field) -> bool:
+    """Return True if `field` is PyArrow's ``pa.json_()`` extension type
+    (Utf8/LargeUtf8-backed, ``arrow.json``).
+
+    ``pa.json_()`` is one of PyArrow's built-in canonical extension types
+    (``pyarrow.lib.JsonType``), which subclasses ``pa.BaseExtensionType``
+    rather than the user-registerable ``pa.ExtensionType`` that e.g.
+    :class:`BlobType` above uses — so both need checking.
+    """
+    field_type = field.type
+    if (
+        isinstance(field_type, (pa.ExtensionType, pa.BaseExtensionType))
+        and field_type.extension_name == _ARROW_JSON_EXTENSION_NAME
+    ):
+        return True
+    return _metadata_marks_arrow_json(field.metadata or {})
+
+
+def is_lance_json_field(field: pa.Field) -> bool:
+    """Return True if `field` is Lance's on-disk JSON column (LargeBinary-backed
+    JSONB, ``lance.json``)."""
+    field_type = field.type
+    if (
+        isinstance(field_type, (pa.ExtensionType, pa.BaseExtensionType))
+        and field_type.extension_name == _LANCE_JSON_EXTENSION_NAME
+    ):
+        return True
+    return _metadata_marks_lance_json(field.metadata or {})
 
 
 def _collect_blob_paths(schema: pa.Schema, is_blob) -> list[str]:

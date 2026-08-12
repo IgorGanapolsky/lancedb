@@ -99,7 +99,12 @@ from .util import (
     value_to_sql,
 )
 from .index import lang_mapping
-from .schema import blob_v2_column_paths, schema_has_blob_field
+from .schema import (
+    blob_v2_column_paths,
+    is_arrow_json_field,
+    is_lance_json_field,
+    schema_has_blob_field,
+)
 
 
 def _should_push_down_query_table(
@@ -444,6 +449,18 @@ def _align_field_types(
         target_field = next((f for f in target_fields if f.name == field.name), None)
         if target_field is None:
             raise ValueError(f"Field '{field.name}' not found in target schema")
+        if is_arrow_json_field(field) and is_lance_json_field(target_field):
+            # Lance's write path does its own arrow.json -> lance.json JSONB
+            # encoding for any field that still carries arrow.json extension
+            # metadata when it reaches lance-core (this is also why
+            # `add()` never casts this field itself; see
+            # `cast_to_table_schema` in the Rust crate). Forcing a generic
+            # PyArrow cast to the target's LargeBinary storage type here
+            # instead copies the raw JSON text bytes in unencoded, so every
+            # later `json_extract` filter over the column fails (#3923).
+            # Pass the field through as-is and let lance-core encode it.
+            new_fields.append(field)
+            continue
         if pa.types.is_struct(target_field.type):
             if pa.types.is_struct(field.type):
                 new_type = pa.struct(

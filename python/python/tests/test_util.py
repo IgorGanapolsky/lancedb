@@ -907,6 +907,54 @@ def test_cast_to_target_schema():
     assert output == expected
 
 
+def test_cast_to_target_schema_preserves_arrow_json_for_merge_insert():
+    """Regression test for lancedb#3923.
+
+    `merge_insert` always routes new data through `_cast_to_target_schema`
+    with the *table's stored schema* as the target (see `AsyncTable._do_merge`).
+    A `pa.json_()` (`arrow.json`) input column is reported there as Lance's
+    on-disk `lance.json` extension: LargeBinary storage carrying an
+    `ARROW:extension:name = lance.json` field-metadata tag (not a registered
+    PyArrow extension type). Before the fix, `_align_field_types` forced this
+    column to the target's LargeBinary type via a generic PyArrow cast, which
+    copies the raw JSON text bytes in unencoded instead of letting lance-core
+    apply its own JSONB encoding — silently corrupting the column for every
+    row written through `merge_insert` and breaking `json_extract` filters
+    over the whole table.
+    """
+    arrow_json_field = pa.field("j", pa.json_(), nullable=True)
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array(["a"]), pa.array(['{"k": 2}'], type=pa.utf8()).cast(pa.json_())],
+        schema=pa.schema([pa.field("id", pa.utf8()), arrow_json_field]),
+    )
+    data = pa.Table.from_batches([batch])
+
+    # Mirrors how a lancedb table with a JSON column reports its schema:
+    # LargeBinary storage tagged with the lance.json extension name, not a
+    # registered PyArrow extension type.
+    lance_json_field = pa.field(
+        "j",
+        pa.large_binary(),
+        nullable=True,
+        metadata={"ARROW:extension:name": "lance.json"},
+    )
+    target = pa.schema([pa.field("id", pa.utf8()), lance_json_field])
+
+    output = _cast_to_target_schema(data.to_reader(), target).read_all()
+
+    # The JSON field must be passed through unchanged (still arrow.json,
+    # still the original text), not force-cast to the target's LargeBinary
+    # type. lance-core performs the arrow.json -> lance.json JSONB encoding
+    # itself when it receives a field still tagged as arrow.json.
+    out_field = output.schema.field("j")
+    assert out_field.type == pa.json_(), (
+        f"JSON field was cast away from arrow.json to {out_field.type}; "
+        "lance-core will store the raw, unencoded bytes instead of "
+        "JSONB-encoding them (lancedb#3923)"
+    )
+    assert output.column("j")[0].as_py() == '{"k": 2}'
+
+
 def test_sanitize_data_stream():
     # Make sure we don't collect the whole stream when running sanitize_data
     schema = pa.schema({"a": pa.int32()})
