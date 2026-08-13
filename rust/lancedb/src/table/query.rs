@@ -556,7 +556,11 @@ fn convert_to_namespace_query(query: &AnyQuery) -> Result<NsQueryTableRequest> {
             Ok(NsQueryTableRequest {
                 id: None, // Will be set by caller
                 vector,
-                k: q.limit.unwrap_or(10) as i32,
+                // Plain (non-vector) queries have no "top-K" semantics, so an absent
+                // limit means "unbounded", not the ANN default of 10. Mirrors the
+                // remote/table.rs handling for the same historical bug: see
+                // https://github.com/lancedb/lancedb/issues/2211
+                k: q.limit.map(|l| l as i32).unwrap_or(i32::MAX),
                 filter,
                 columns,
                 prefilter: Some(q.prefilter),
@@ -827,6 +831,24 @@ mod tests {
         assert!(ns_request.vector_column.is_none());
 
         assert!(ns_request.vector.single_vector.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_convert_to_namespace_query_plain_query_no_limit_is_unbounded() {
+        // Regression test for a bug where a plain query with no explicit `.limit()`
+        // silently inherited the ANN "top-K" default of 10 rows via `unwrap_or(10)`,
+        // truncating results that should have been unbounded.
+        let q = QueryRequest {
+            limit: None,
+            filter: Some(QueryFilter::Sql("id > 5".to_string())),
+            ..Default::default()
+        };
+
+        let any_query = AnyQuery::Query(q);
+
+        let ns_request = convert_to_namespace_query(&any_query).unwrap();
+
+        assert_eq!(ns_request.k, i32::MAX);
     }
 
     #[tokio::test]
