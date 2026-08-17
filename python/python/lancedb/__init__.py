@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright The LanceDB Authors
 
 
-import importlib.metadata
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Dict, Optional, Union, Any, List, Iterable
 
-__version__ = importlib.metadata.version("lancedb")
+from ._version import resolve_version
+
+__version__ = resolve_version()
 
 from ._lancedb import connect as lancedb_connect
 from ._lancedb import FtsToken
