@@ -520,6 +520,26 @@ def test_create_table_exist_ok():
         assert table is not None
 
 
+def test_create_table_storage_options():
+    def handler(request):
+        if request.path == "/v1/table/test/create/?mode=create":
+            request.send_response(200)
+            request.send_header("Content-Type", "application/json")
+            request.end_headers()
+            request.wfile.write(b"{}")
+        else:
+            request.send_response(404)
+            request.end_headers()
+
+    with mock_lancedb_connection(handler) as db:
+        # storage_options is accepted (and ignored, like open_table) rather than
+        # raising TypeError for an unexpected keyword argument.
+        table = db.create_table(
+            "test", [{"id": 1}], storage_options={"aws_region": "us-east-1"}
+        )
+        assert table is not None
+
+
 def test_create_table_exist_ok_with_mode_overwrite():
     def handler(request):
         if request.path == "/v1/table/test/create/?mode=overwrite":

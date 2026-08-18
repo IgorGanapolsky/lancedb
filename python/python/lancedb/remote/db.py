@@ -510,6 +510,7 @@ class RemoteDBConnection(DBConnection):
         embedding_functions: Optional[List[EmbeddingFunctionConfig]] = None,
         *,
         namespace_path: Optional[List[str]] = None,
+        storage_options: Optional[Dict[str, str]] = None,
     ) -> Table:
         """Create a [Table][lancedb.table.Table] in the database.
 
@@ -520,6 +521,10 @@ class RemoteDBConnection(DBConnection):
         namespace_path: List[str], optional
             The namespace to create the table in.
             None or empty list represents root namespace.
+        storage_options: dict, optional
+            Additional options for the storage backend. Ignored on LanceDB
+            Cloud, where storage is managed; set ``storage_options`` on
+            ``connect()`` instead.
         data: The data to initialize the table, *optional*
             User must provide at least one of `data` or `schema`.
             Acceptable types are:
@@ -620,6 +625,11 @@ class RemoteDBConnection(DBConnection):
         if namespace_path is None:
             namespace_path = []
         validate_table_name(name)
+        if storage_options is not None:
+            logging.info(
+                "storage_options is ignored in LanceDb Cloud"
+                " (storage is managed; set storage_options on connect() instead)"
+            )
         if embedding_functions is not None:
             logging.warning(
                 "embedding_functions is not yet supported on LanceDB Cloud."
